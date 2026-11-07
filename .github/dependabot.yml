@@ -1,0 +1,36 @@
+# Pull requests for outdated dependencies, once a week (DEPLOY.md, "Dependencies"). Each runs the checks of
+# .github/workflows/deploy.yml, including npm audit; merging one deploys it. Security fixes come as soon as GitHub
+# knows of them once Dependabot security updates are on (repository Settings › Code security).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # A release waits a week, so one that was hijacked is usually pulled before it gets here
+    cooldown:
+      default-days: 7
+    # Minor and patch updates in two pull requests a week; major ones come one by one
+    groups:
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  # The workflow's actions are pinned to commits; Dependabot moves the pin and its version comment together
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The Dockerfile's Node image stays on 24, like .nvmrc
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]

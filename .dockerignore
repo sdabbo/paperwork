@@ -1,0 +1,17 @@
+# Never in the image: local secrets, local data, build output and dependencies (rebuilt inside)
+.env
+.env.*
+!.env.example
+data/
+node_modules/
+dist/
+dist-server/
+coverage/
+# The worker runs on Cloudflare; only its code is needed, shown in Settings › Email
+email-worker/*
+!email-worker/worker.js
+.git/
+# The credentials file GitHub's sign-in to Google Cloud writes into the checkout (google-github-actions/auth)
+gha-creds-*.json
+.claude/
+*.log

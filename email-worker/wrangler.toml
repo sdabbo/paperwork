@@ -1,0 +1,11 @@
+# Cloudflare Email Worker that hands emails to Paperwork (see worker.js and DEPLOY.md)
+name = "paperwork-email"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Paperwork's address, as printed by deploy/deploy.sh
+PAPERWORK_URL = "https://paperwork-PROJECT_NUMBER.europe-west3.run.app"
+
+# The shared secret is not kept here. Set it with:
+#   npx wrangler secret put INBOUND_EMAIL_SECRET

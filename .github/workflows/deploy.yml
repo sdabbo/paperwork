@@ -1,0 +1,133 @@
+# Checks every push and pull request; deploys pushes to the default branch to Cloud Run (see DEPLOY.md), then
+# checks the doors from outside (deploy/guard.sh). Where to deploy comes from deploy/github-deploy.env (written by
+# deploy/setup.sh, extended by deploy/protect.sh) or GitHub variables of the same names; without either, only the
+# checks run. The app's settings (allowed accounts, sign-in client, …) stay as the running service has them unless
+# GitHub variables give others.
+name: Check and deploy
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Type check, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Known vulnerabilities in what runs on Cloud Run fail the check (DEPLOY.md, "Dependencies")
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    name: Deploy to Cloud Run
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.target.outputs.url }}
+    # One deploy at a time, in push order
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # GitHub's sign-in token, exchanged for the deploy account (no stored key)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Where to deploy
+        id: target
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          GCP_APP_SERVICE: ${{ vars.GCP_APP_SERVICE }}
+          GCP_EDGE_SERVICE_ACCOUNT: ${{ vars.GCP_EDGE_SERVICE_ACCOUNT }}
+        run: |
+          # A GitHub variable, else the value in deploy/github-deploy.env
+          value() {
+            local v="${!1:-}"
+            [ -n "$v" ] || v="$({ grep -E "^$1=" deploy/github-deploy.env 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
+            printf '%s' "$v"
+          }
+          project="$(value GCP_PROJECT_ID)"
+          number="$(value GCP_PROJECT_NUMBER)"
+          region="$(value GCP_REGION)"
+          region="${region:-europe-west3}"
+          if [ -z "$project" ] || [ -z "$number" ]; then
+            echo "::notice::Not deploying: run deploy/setup.sh and commit deploy/github-deploy.env (DEPLOY.md)."
+            echo "deploy=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Written by deploy/protect.sh split: two services (the app behind IAP, the public edge)
+          app_service="$(value GCP_APP_SERVICE)"
+          edge_account="$(value GCP_EDGE_SERVICE_ACCOUNT)"
+          {
+            echo "PROJECT_ID=$project"
+            echo "PROJECT_NUMBER=$number"
+            echo "REGION=$region"
+            echo "IMAGE=$region-docker.pkg.dev/$project/paperwork/paperwork:$GITHUB_SHA"
+            if [ -n "$app_service" ]; then echo "APP_SERVICE=$app_service"; fi
+            if [ -n "$edge_account" ]; then echo "EDGE_SA=$edge_account"; fi
+          } >>"$GITHUB_ENV"
+          {
+            echo "deploy=true"
+            echo "provider=$(value GCP_WORKLOAD_IDENTITY_PROVIDER)"
+            echo "account=$(value GCP_DEPLOY_SERVICE_ACCOUNT)"
+            # The address the owner opens: the app's, as two services
+            echo "url=https://${app_service:-paperwork}-$number.$region.run.app"
+          } >>"$GITHUB_OUTPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.target.outputs.deploy == 'true'
+        with:
+          node-version-file: .nvmrc
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.target.outputs.deploy == 'true'
+        with:
+          workload_identity_provider: ${{ steps.target.outputs.provider }}
+          service_account: ${{ steps.target.outputs.account }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        if: steps.target.outputs.deploy == 'true'
+      - name: Build and push the image
+        if: steps.target.outputs.deploy == 'true'
+        run: |
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+      - name: Deploy
+        if: steps.target.outputs.deploy == 'true'
+        run: deploy/deploy.sh
+        # Settings given here replace the running service's; empty ones keep them
+        env:
+          ALLOWED_EMAILS: ${{ secrets.ALLOWED_EMAILS }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          PICKER_API_KEY: ${{ vars.PICKER_API_KEY }}
+          GEMINI_MODELS: ${{ vars.GEMINI_MODELS }}
+          GEMINI_DAILY_REQUEST_LIMIT: ${{ vars.GEMINI_DAILY_REQUEST_LIMIT }}
+          GEMINI_DAILY_TOKEN_LIMIT: ${{ vars.GEMINI_DAILY_TOKEN_LIMIT }}
+          GEMINI_EMBEDDING_MODEL: ${{ vars.GEMINI_EMBEDDING_MODEL }}
+          GEMINI_DAILY_EMBEDDING_LIMIT: ${{ vars.GEMINI_DAILY_EMBEDDING_LIMIT }}
+          DRIVE_ACCESS: ${{ vars.DRIVE_ACCESS }}
+          APP_LANGUAGE: ${{ vars.APP_LANGUAGE }}
+          DRIVE_FOLDER_NAME: ${{ vars.DRIVE_FOLDER_NAME }}
+          INBOUND_EMAIL_ADDRESS: ${{ vars.INBOUND_EMAIL_ADDRESS }}
+          INBOUND_ALLOWED_SENDERS: ${{ vars.INBOUND_ALLOWED_SENDERS }}
+      # As two services: IAP on and nobody else let in for the app, only machine paths on the edge (as one service
+      # it says so and passes). A failure leaves the deploy in place and fails the run, which GitHub emails.
+      - name: Check the doors
+        if: steps.target.outputs.deploy == 'true'
+        run: deploy/guard.sh
